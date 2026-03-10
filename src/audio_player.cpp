@@ -38,6 +38,42 @@ bool initAudioPlayer() {
   return true;
 }
 
+void listSDFiles() {
+  if (!audioInitialized) {
+    Serial.println("SD card not initialized - cannot list files");
+    return;
+  }
+  Serial.println("SD card root directory:");
+  Serial.println("----------------------------");
+  File root = SD.open("/");
+  if (!root) {
+    Serial.println("Failed to open root directory");
+    return;
+  }
+  if (!root.isDirectory()) {
+    Serial.println("Root is not a directory");
+    root.close();
+    return;
+  }
+  File entry = root.openNextFile();
+  while (entry) {
+    if (entry.isDirectory()) {
+      Serial.print("  [DIR]  ");
+      Serial.println(entry.name());
+    } else {
+      Serial.print("  ");
+      Serial.print(entry.name());
+      Serial.print("  (");
+      Serial.print(entry.size());
+      Serial.println(" bytes)");
+    }
+    entry.close();
+    entry = root.openNextFile();
+  }
+  root.close();
+  Serial.println("----------------------------");
+}
+
 bool playSoundFile(const char* filename) {
   if (!audioInitialized) {
     Serial.println("Audio player not initialized!");

@@ -12,6 +12,9 @@ bool initAudioPlayer();
 // Returns true if successful, false otherwise
 bool playSoundFile(const char* filename);
 
+// List files in the root directory of the SD card (prints to Serial)
+void listSDFiles();
+
 #endif // AUDIO_PLAYER_H
 
 
