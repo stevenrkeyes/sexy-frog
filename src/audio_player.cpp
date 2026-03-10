@@ -10,12 +10,15 @@
 #define I2S_DOUT_PIN 3  // Data out
 
 
-// Audio buffer size
-#define AUDIO_BUFFER_SIZE 20000
+// Audio buffer size (bytes from SD). We use 512-byte chunks = 256 mono samples = 256 stereo frames.
+#define AUDIO_BUFFER_SIZE 8000
+#define STEREO_FRAMES_PER_BUFFER 4000
 
 static bool audioInitialized = false;
 static uint8_t s_audioBuffer[AUDIO_BUFFER_SIZE];
-static int16_t s_sampleBuffer[AUDIO_BUFFER_SIZE / 2];
+// Two stereo buffers for DMA double-buffering (I2S fills one while we fill the other from SD).
+static uint32_t s_stereoBuf0[STEREO_FRAMES_PER_BUFFER];
+static uint32_t s_stereoBuf1[STEREO_FRAMES_PER_BUFFER];
 
 bool initAudioPlayer() {
   Serial.println("Initializing audio player...");
@@ -74,6 +77,30 @@ void listSDFiles() {
   }
   root.close();
   Serial.println("----------------------------");
+}
+
+// Convert bytes (mono 16-bit LE) to stereo frames (L=R) in out_frames. Up to frame_count frames.
+// If stereo_bytes is true, bytes are L,R pairs - we use only L channel.
+static void fillStereoBuffer(uint32_t* out_frames, const uint8_t* bytes, size_t byte_count,
+                             bool stereo_bytes, size_t frame_count) {
+  size_t i = 0;
+  if (stereo_bytes) {
+    const size_t frame_count_from_data = byte_count / 4; // 4 bytes per L+R frame
+    for (; i < frame_count_from_data && i < frame_count; i++) {
+      const size_t base = i * 4;
+      const uint16_t s = (uint16_t)bytes[base] | ((uint16_t)bytes[base + 1] << 8);
+      out_frames[i] = ((uint32_t)s << 16) | (uint32_t)s;
+    }
+  } else {
+    const size_t sample_count = byte_count / 2;
+    for (; i < sample_count && i < frame_count; i++) {
+      const uint16_t s = (uint16_t)bytes[2 * i] | ((uint16_t)bytes[2 * i + 1] << 8);
+      out_frames[i] = ((uint32_t)s << 16) | (uint32_t)s;
+    }
+  }
+  for (; i < frame_count; i++) {
+    out_frames[i] = 0;
+  }
 }
 
 bool playSoundFile(const char* filename) {
@@ -181,64 +208,83 @@ bool playSoundFile(const char* filename) {
   bool isStereo = (numChannels == 2);
   Serial.println("Playing audio file...");
 
-  // Seek to start of data payload and play
   audioFile.seek(dataStart);
-  size_t bytesRead;
   size_t totalPlayed = 0;
-  unsigned long startTime = millis();
+  const unsigned long startTime = millis();
 
-  while (audioFile.available() && totalPlayed < dataSize) {
-    size_t toRead = AUDIO_BUFFER_SIZE;
-    if (dataSize - totalPlayed < toRead) {
-      toRead = dataSize - totalPlayed;
-    }
-    bytesRead = audioFile.read(s_audioBuffer, toRead);
-    if (bytesRead == 0) {
-      break;
-    }
-    totalPlayed += bytesRead;
-
-    {
-      // Interpret as 16-bit little-endian PCM and stream to I2S.
-      // If stereo, use only the first channel (L) and downmix to mono.
-      size_t mono_sample_count = 0;
-
-      if (isStereo) {
-        // Each frame: L (2 bytes), R (2 bytes)
-        const size_t frame_count = bytesRead / 4;
-        if (frame_count == 0) {
-          continue;
-        }
-        mono_sample_count = frame_count;
-        for (size_t i = 0; i < frame_count; i++) {
-          const size_t base = i * 4;
-          s_sampleBuffer[i] = (int16_t)((uint16_t)s_audioBuffer[base] | ((uint16_t)s_audioBuffer[base + 1] << 8));
-        }
-      } else {
-        // Mono: 2 bytes per sample
-        const size_t sample_count = bytesRead / 2;
-        if (sample_count == 0) {
-          continue;
-        }
-        mono_sample_count = sample_count;
-        for (size_t i = 0; i < sample_count; i++) {
-          s_sampleBuffer[i] = (int16_t)((uint16_t)s_audioBuffer[2 * i] | ((uint16_t)s_audioBuffer[2 * i + 1] << 8));
-        }
-      }
-
-      if (!max98357::writeMono16(s_sampleBuffer, mono_sample_count)) {
-        Serial.println("Audio write failed");
-        break;
-      }
-    }
+  // Fill first two buffers from SD, then start I2S DMA streaming (double-buffer).
+  Serial.println("[1] Reading first chunk...");
+  size_t toRead = AUDIO_BUFFER_SIZE;
+  if (dataSize - totalPlayed < toRead) {
+    toRead = dataSize - totalPlayed;
   }
-  
+  size_t bytesRead = audioFile.read(s_audioBuffer, toRead);
+  if (bytesRead == 0) {
+    Serial.println("[1] ERROR: no bytes read");
+    audioFile.close();
+    return false;
+  }
+  totalPlayed += bytesRead;
+  fillStereoBuffer(s_stereoBuf0, s_audioBuffer, bytesRead, isStereo, STEREO_FRAMES_PER_BUFFER);
+  Serial.println("[2] Filled buf0, reading second chunk...");
+
+  toRead = AUDIO_BUFFER_SIZE;
+  if (dataSize - totalPlayed < toRead) {
+    toRead = dataSize - totalPlayed;
+  }
+  bytesRead = audioFile.read(s_audioBuffer, toRead);
+  totalPlayed += bytesRead;
+  fillStereoBuffer(s_stereoBuf1, s_audioBuffer, bytesRead, isStereo, STEREO_FRAMES_PER_BUFFER);
+  Serial.println("[3] Filled buf1, calling startStreaming...");
+
+  if (!max98357::startStreaming(s_stereoBuf0, s_stereoBuf1, STEREO_FRAMES_PER_BUFFER)) {
+    Serial.println("[3] Audio write failed");
+    audioFile.close();
+    return false;
+  }
+  Serial.println("[4] Streaming started, entering refill loop...");
+
+  // Refill buffers from SD as each is consumed by I2S DMA (poll for TXPTRUPD in main).
+  bool firstLoop = true;
+  while (max98357::isStreaming() || max98357::getRefillBufferIndex() >= 0) {
+    if (firstLoop) {
+      Serial.println("[5] In refill loop");
+      firstLoop = false;
+    }
+    max98357::pollTxptrupd();
+    const int refillIdx = max98357::getRefillBufferIndex();
+    if (refillIdx >= 0) {
+      Serial.print("[5a] Refilling buf");
+      Serial.println(refillIdx);
+      uint32_t* dst = (refillIdx == 0) ? s_stereoBuf0 : s_stereoBuf1;
+      if (totalPlayed < dataSize) {
+        toRead = AUDIO_BUFFER_SIZE;
+        if (dataSize - totalPlayed < toRead) {
+          toRead = dataSize - totalPlayed;
+        }
+        bytesRead = audioFile.read(s_audioBuffer, toRead);
+        totalPlayed += bytesRead;
+        fillStereoBuffer(dst, s_audioBuffer, bytesRead, isStereo, STEREO_FRAMES_PER_BUFFER);
+      } else {
+        // No more data: fill with silence and request stop after this buffer plays.
+        Serial.println("[6] No more data, filling silence and requesting stop");
+        memset(dst, 0, sizeof(s_stereoBuf0));
+        max98357::requestStopAfterNextBuffer();
+      }
+      max98357::clearRefillRequest();
+    }
+    yield();
+  }
+
+  Serial.println("[7] Exited refill loop, calling stopStreaming...");
+  max98357::stopStreaming();
+  Serial.println("[8] stopStreaming done, closing file...");
   audioFile.close();
-  
-  unsigned long duration = millis() - startTime;
+
+  const unsigned long duration = millis() - startTime;
   Serial.print("Playback complete. Duration: ");
   Serial.print(duration);
   Serial.println(" ms");
-  
+
   return true;
 }

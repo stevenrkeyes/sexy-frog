@@ -3,6 +3,11 @@
 // Use the nRF I2S HAL (inline, no extra link symbols needed).
 #include <hal/nrf_i2s.h>
 
+// I2S interrupt number for nRF52840 (from nrf52840.h)
+#if !defined(I2S_IRQn)
+#define I2S_IRQn 37
+#endif
+
 namespace max98357 {
 
 // Keep buffers in Data RAM for EasyDMA.
@@ -10,6 +15,51 @@ static constexpr uint16_t kFramesPerChunk = 256; // 256 stereo frames per transf
 static uint32_t s_tx_buffer[kFramesPerChunk];
 
 static bool s_inited = false;
+
+// Double-buffer streaming state
+static uint32_t* s_buf0 = nullptr;
+static uint32_t* s_buf1 = nullptr;
+static uint16_t s_frame_count = 0;
+static volatile uint8_t s_next_index = 0;   // 0 or 1: which buffer to give next to I2S
+static volatile int8_t s_refill_index = -1; // 0 or 1: which buffer needs refill; -1 = none
+static volatile bool s_stop_after_next = false;
+static volatile bool s_streaming = false;
+static volatile bool s_first_txptrupd = true; // first TXPTRUPD after START: no buffer finished yet
+
+extern "C" void I2S_IRQHandler(void) {
+  if (!nrf_i2s_event_check(NRF_I2S, NRF_I2S_EVENT_TXPTRUPD)) {
+    return;
+  }
+  // Do NOT clear the event here: on nRF52 it can hang/fail in the ISR. Disable the
+  // interrupt so we return once; main will clear the event and re-enable the interrupt.
+  nrf_i2s_int_disable(NRF_I2S, NRF_I2S_INT_TXPTRUPD_MASK);
+
+  if (!s_streaming || !s_buf0 || !s_buf1) {
+    return;
+  }
+
+  if (s_stop_after_next) {
+    nrf_i2s_task_trigger(NRF_I2S, NRF_I2S_TASK_STOP);
+    s_streaming = false;
+    s_refill_index = -1;
+    return;
+  }
+
+  // The buffer we gave last time is now in use. The other buffer just finished playing.
+  uint8_t next;
+  if (s_first_txptrupd) {
+    s_first_txptrupd = false;
+    next = 1;
+    s_refill_index = -1; // no buffer finished yet
+  } else {
+    s_refill_index = (int8_t)(1 - s_next_index); // buffer that just finished needs refill
+    next = 1 - s_next_index;
+  }
+  s_next_index = next;
+
+  uint32_t* next_buf = (next == 0) ? s_buf0 : s_buf1;
+  nrf_i2s_tx_buffer_set(NRF_I2S, next_buf);
+}
 
 bool begin(uint8_t bclk_pin, uint8_t lrclk_pin, uint8_t dout_pin) {
   if (s_inited) {
@@ -49,10 +99,131 @@ void end() {
   if (!s_inited) {
     return;
   }
-
+  stopStreaming();
   nrf_i2s_task_trigger(NRF_I2S, NRF_I2S_TASK_STOP);
   nrf_i2s_disable(NRF_I2S);
   s_inited = false;
+}
+
+bool startStreaming(uint32_t* buf0, uint32_t* buf1, uint16_t frame_count) {
+  Serial.println("[S1] startStreaming entry");
+  if (!s_inited || !buf0 || !buf1 || frame_count == 0) {
+    Serial.println("[S1] bad args, return false");
+    return false;
+  }
+  s_buf0 = buf0;
+  s_buf1 = buf1;
+  s_frame_count = frame_count;
+  s_next_index = 0;
+  s_refill_index = -1;
+  s_stop_after_next = false;
+  s_streaming = true;
+  s_first_txptrupd = true;
+  Serial.println("[S2] state set");
+
+  nrf_i2s_event_clear(NRF_I2S, NRF_I2S_EVENT_TXPTRUPD);
+  nrf_i2s_event_clear(NRF_I2S, NRF_I2S_EVENT_STOPPED);
+  Serial.println("[S3] events cleared");
+
+  nrf_i2s_enable(NRF_I2S);
+  Serial.println("[S4] I2S enabled");
+
+  nrf_i2s_transfer_set(NRF_I2S, frame_count, nullptr, buf0);
+  Serial.println("[S5] transfer_set done");
+
+  // Do NOT enable the interrupt yet. Trigger START and handle the first TXPTRUPD in main.
+  // On nRF52, clearing TXPTRUPD in the ISR can hang (errata); the first event fires immediately.
+  nrf_i2s_task_trigger(NRF_I2S, NRF_I2S_TASK_START);
+  Serial.println("[S5a] START triggered, waiting for first TXPTRUPD in main...");
+
+  uint32_t t0 = millis();
+  while (!nrf_i2s_event_check(NRF_I2S, NRF_I2S_EVENT_TXPTRUPD)) {
+    if ((millis() - t0) > 100) {
+      Serial.println("[S5a] timeout waiting for first TXPTRUPD");
+      nrf_i2s_task_trigger(NRF_I2S, NRF_I2S_TASK_STOP);
+      nrf_i2s_disable(NRF_I2S);
+      s_streaming = false;
+      return false;
+    }
+  }
+  nrf_i2s_event_clear(NRF_I2S, NRF_I2S_EVENT_TXPTRUPD);
+  nrf_i2s_tx_buffer_set(NRF_I2S, buf1);
+  s_next_index = 1;
+  s_first_txptrupd = false;
+  Serial.println("[S5b] First TXPTRUPD handled in main (no interrupt, using polling)");
+  Serial.println("[S8] startStreaming done, returning true");
+  return true;
+}
+
+bool pollTxptrupd() {
+  if (!s_streaming || !s_buf0 || !s_buf1) {
+    return false;
+  }
+  if (!nrf_i2s_event_check(NRF_I2S, NRF_I2S_EVENT_TXPTRUPD)) {
+    return false;
+  }
+  nrf_i2s_event_clear(NRF_I2S, NRF_I2S_EVENT_TXPTRUPD);
+
+  if (s_stop_after_next) {
+    nrf_i2s_task_trigger(NRF_I2S, NRF_I2S_TASK_STOP);
+    s_streaming = false;
+    s_refill_index = -1;
+    return false;
+  }
+
+  uint8_t next;
+  if (s_first_txptrupd) {
+    s_first_txptrupd = false;
+    next = 1;
+    s_refill_index = -1;
+  } else {
+    s_refill_index = (int8_t)(1 - s_next_index); // buffer that just finished needs refill
+    next = 1 - s_next_index;
+  }
+  s_next_index = next;
+  uint32_t* next_buf = (next == 0) ? s_buf0 : s_buf1;
+  nrf_i2s_tx_buffer_set(NRF_I2S, next_buf);
+  return true;
+}
+
+void stopStreaming() {
+  if (s_streaming) {
+    NVIC_DisableIRQ((IRQn_Type)I2S_IRQn);
+    nrf_i2s_int_disable(NRF_I2S, NRF_I2S_INT_TXPTRUPD_MASK);
+    nrf_i2s_task_trigger(NRF_I2S, NRF_I2S_TASK_STOP);
+    s_streaming = false;
+  }
+  if (s_inited && s_buf0) {
+    uint32_t t = millis();
+    while (!nrf_i2s_event_check(NRF_I2S, NRF_I2S_EVENT_STOPPED) && (millis() - t < 200)) {
+      // wait
+    }
+    nrf_i2s_disable(NRF_I2S);
+  }
+  s_buf0 = nullptr;
+  s_buf1 = nullptr;
+  s_refill_index = -1;
+}
+
+int getRefillBufferIndex() {
+  return (int)s_refill_index;
+}
+
+void clearRefillRequest() {
+  s_refill_index = -1;
+}
+
+void clearTxptrupdAndReenableInterrupt() {
+  nrf_i2s_event_clear(NRF_I2S, NRF_I2S_EVENT_TXPTRUPD);
+  nrf_i2s_int_enable(NRF_I2S, NRF_I2S_INT_TXPTRUPD_MASK);
+}
+
+void requestStopAfterNextBuffer() {
+  s_stop_after_next = true;
+}
+
+bool isStreaming() {
+  return s_streaming;
 }
 
 static bool writeFramesBlocking(uint32_t const* frames, uint16_t frame_count) {
