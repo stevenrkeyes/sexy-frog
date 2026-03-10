@@ -11,9 +11,11 @@
 
 
 // Audio buffer size
-#define AUDIO_BUFFER_SIZE 512
+#define AUDIO_BUFFER_SIZE 20000
 
 static bool audioInitialized = false;
+static uint8_t s_audioBuffer[AUDIO_BUFFER_SIZE];
+static int16_t s_sampleBuffer[AUDIO_BUFFER_SIZE / 2];
 
 bool initAudioPlayer() {
   Serial.println("Initializing audio player...");
@@ -181,7 +183,6 @@ bool playSoundFile(const char* filename) {
 
   // Seek to start of data payload and play
   audioFile.seek(dataStart);
-  uint8_t buffer[AUDIO_BUFFER_SIZE];
   size_t bytesRead;
   size_t totalPlayed = 0;
   unsigned long startTime = millis();
@@ -191,7 +192,7 @@ bool playSoundFile(const char* filename) {
     if (dataSize - totalPlayed < toRead) {
       toRead = dataSize - totalPlayed;
     }
-    bytesRead = audioFile.read(buffer, toRead);
+    bytesRead = audioFile.read(s_audioBuffer, toRead);
     if (bytesRead == 0) {
       break;
     }
@@ -200,7 +201,6 @@ bool playSoundFile(const char* filename) {
     {
       // Interpret as 16-bit little-endian PCM and stream to I2S.
       // If stereo, use only the first channel (L) and downmix to mono.
-      int16_t samples[AUDIO_BUFFER_SIZE / 2];
       size_t mono_sample_count = 0;
 
       if (isStereo) {
@@ -212,7 +212,7 @@ bool playSoundFile(const char* filename) {
         mono_sample_count = frame_count;
         for (size_t i = 0; i < frame_count; i++) {
           const size_t base = i * 4;
-          samples[i] = (int16_t)((uint16_t)buffer[base] | ((uint16_t)buffer[base + 1] << 8));
+          s_sampleBuffer[i] = (int16_t)((uint16_t)s_audioBuffer[base] | ((uint16_t)s_audioBuffer[base + 1] << 8));
         }
       } else {
         // Mono: 2 bytes per sample
@@ -222,11 +222,11 @@ bool playSoundFile(const char* filename) {
         }
         mono_sample_count = sample_count;
         for (size_t i = 0; i < sample_count; i++) {
-          samples[i] = (int16_t)((uint16_t)buffer[2 * i] | ((uint16_t)buffer[2 * i + 1] << 8));
+          s_sampleBuffer[i] = (int16_t)((uint16_t)s_audioBuffer[2 * i] | ((uint16_t)s_audioBuffer[2 * i + 1] << 8));
         }
       }
 
-      if (!max98357::writeMono16(samples, mono_sample_count)) {
+      if (!max98357::writeMono16(s_sampleBuffer, mono_sample_count)) {
         Serial.println("Audio write failed");
         break;
       }
