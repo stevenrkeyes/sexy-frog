@@ -213,20 +213,17 @@ bool playSoundFile(const char* filename) {
   const unsigned long startTime = millis();
 
   // Fill first two buffers from SD, then start I2S DMA streaming (double-buffer).
-  Serial.println("[1] Reading first chunk...");
   size_t toRead = AUDIO_BUFFER_SIZE;
   if (dataSize - totalPlayed < toRead) {
     toRead = dataSize - totalPlayed;
   }
   size_t bytesRead = audioFile.read(s_audioBuffer, toRead);
   if (bytesRead == 0) {
-    Serial.println("[1] ERROR: no bytes read");
     audioFile.close();
     return false;
   }
   totalPlayed += bytesRead;
   fillStereoBuffer(s_stereoBuf0, s_audioBuffer, bytesRead, isStereo, STEREO_FRAMES_PER_BUFFER);
-  Serial.println("[2] Filled buf0, reading second chunk...");
 
   toRead = AUDIO_BUFFER_SIZE;
   if (dataSize - totalPlayed < toRead) {
@@ -235,27 +232,21 @@ bool playSoundFile(const char* filename) {
   bytesRead = audioFile.read(s_audioBuffer, toRead);
   totalPlayed += bytesRead;
   fillStereoBuffer(s_stereoBuf1, s_audioBuffer, bytesRead, isStereo, STEREO_FRAMES_PER_BUFFER);
-  Serial.println("[3] Filled buf1, calling startStreaming...");
 
   if (!max98357::startStreaming(s_stereoBuf0, s_stereoBuf1, STEREO_FRAMES_PER_BUFFER)) {
-    Serial.println("[3] Audio write failed");
     audioFile.close();
     return false;
   }
-  Serial.println("[4] Streaming started, entering refill loop...");
 
   // Refill buffers from SD as each is consumed by I2S DMA (poll for TXPTRUPD in main).
   bool firstLoop = true;
   while (max98357::isStreaming() || max98357::getRefillBufferIndex() >= 0) {
     if (firstLoop) {
-      Serial.println("[5] In refill loop");
       firstLoop = false;
     }
     max98357::pollTxptrupd();
     const int refillIdx = max98357::getRefillBufferIndex();
     if (refillIdx >= 0) {
-      Serial.print("[5a] Refilling buf");
-      Serial.println(refillIdx);
       uint32_t* dst = (refillIdx == 0) ? s_stereoBuf0 : s_stereoBuf1;
       if (totalPlayed < dataSize) {
         toRead = AUDIO_BUFFER_SIZE;
@@ -267,7 +258,6 @@ bool playSoundFile(const char* filename) {
         fillStereoBuffer(dst, s_audioBuffer, bytesRead, isStereo, STEREO_FRAMES_PER_BUFFER);
       } else {
         // No more data: fill with silence and request stop after this buffer plays.
-        Serial.println("[6] No more data, filling silence and requesting stop");
         memset(dst, 0, sizeof(s_stereoBuf0));
         max98357::requestStopAfterNextBuffer();
       }
@@ -276,9 +266,7 @@ bool playSoundFile(const char* filename) {
     yield();
   }
 
-  Serial.println("[7] Exited refill loop, calling stopStreaming...");
   max98357::stopStreaming();
-  Serial.println("[8] stopStreaming done, closing file...");
   audioFile.close();
 
   const unsigned long duration = millis() - startTime;

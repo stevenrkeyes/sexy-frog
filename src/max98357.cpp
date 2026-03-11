@@ -106,9 +106,7 @@ void end() {
 }
 
 bool startStreaming(uint32_t* buf0, uint32_t* buf1, uint16_t frame_count) {
-  Serial.println("[S1] startStreaming entry");
   if (!s_inited || !buf0 || !buf1 || frame_count == 0) {
-    Serial.println("[S1] bad args, return false");
     return false;
   }
   s_buf0 = buf0;
@@ -119,27 +117,21 @@ bool startStreaming(uint32_t* buf0, uint32_t* buf1, uint16_t frame_count) {
   s_stop_after_next = false;
   s_streaming = true;
   s_first_txptrupd = true;
-  Serial.println("[S2] state set");
 
   nrf_i2s_event_clear(NRF_I2S, NRF_I2S_EVENT_TXPTRUPD);
   nrf_i2s_event_clear(NRF_I2S, NRF_I2S_EVENT_STOPPED);
-  Serial.println("[S3] events cleared");
 
   nrf_i2s_enable(NRF_I2S);
-  Serial.println("[S4] I2S enabled");
 
   nrf_i2s_transfer_set(NRF_I2S, frame_count, nullptr, buf0);
-  Serial.println("[S5] transfer_set done");
 
   // Do NOT enable the interrupt yet. Trigger START and handle the first TXPTRUPD in main.
   // On nRF52, clearing TXPTRUPD in the ISR can hang (errata); the first event fires immediately.
   nrf_i2s_task_trigger(NRF_I2S, NRF_I2S_TASK_START);
-  Serial.println("[S5a] START triggered, waiting for first TXPTRUPD in main...");
 
   uint32_t t0 = millis();
   while (!nrf_i2s_event_check(NRF_I2S, NRF_I2S_EVENT_TXPTRUPD)) {
     if ((millis() - t0) > 100) {
-      Serial.println("[S5a] timeout waiting for first TXPTRUPD");
       nrf_i2s_task_trigger(NRF_I2S, NRF_I2S_TASK_STOP);
       nrf_i2s_disable(NRF_I2S);
       s_streaming = false;
@@ -150,8 +142,6 @@ bool startStreaming(uint32_t* buf0, uint32_t* buf1, uint16_t frame_count) {
   nrf_i2s_tx_buffer_set(NRF_I2S, buf1);
   s_next_index = 1;
   s_first_txptrupd = false;
-  Serial.println("[S5b] First TXPTRUPD handled in main (no interrupt, using polling)");
-  Serial.println("[S8] startStreaming done, returning true");
   return true;
 }
 
@@ -306,4 +296,3 @@ bool writeMono16(const int16_t* samples, size_t sample_count) {
 }
 
 } // namespace max98357
-
