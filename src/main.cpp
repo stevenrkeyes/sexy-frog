@@ -61,7 +61,7 @@ void loop() {
   // Check if a peripheral is available
   BLEDevice peripheral = BLE.available();
   
-  /*if (peripheral) {
+  if (peripheral) {
     // Print separator
     Serial.println("------------------------------------------");
     
@@ -130,6 +130,6 @@ void loop() {
     
     Serial.println();
   }
-  */
+  
   delay(10);
 }

@@ -11,7 +11,7 @@
 namespace max98357 {
 
 // Keep buffers in Data RAM for EasyDMA.
-static constexpr uint16_t kFramesPerChunk = 256; // 256 stereo frames per transfer
+static constexpr uint16_t kFramesPerChunk = 4000; // stereo frames per transfer
 static uint32_t s_tx_buffer[kFramesPerChunk];
 
 static bool s_inited = false;
@@ -25,6 +25,11 @@ static volatile int8_t s_refill_index = -1; // 0 or 1: which buffer needs refill
 static volatile bool s_stop_after_next = false;
 static volatile bool s_streaming = false;
 static volatile bool s_first_txptrupd = true; // first TXPTRUPD after START: no buffer finished yet
+
+// Debug: timestamps (micros) when we switch to each buffer (up to 100).
+static constexpr uint8_t kMaxSwitchTimestamps = 100;
+static uint32_t s_switch_timestamps[kMaxSwitchTimestamps];
+static uint8_t s_switch_count = 0;
 
 extern "C" void I2S_IRQHandler(void) {
   if (!nrf_i2s_event_check(NRF_I2S, NRF_I2S_EVENT_TXPTRUPD)) {
@@ -117,6 +122,7 @@ bool startStreaming(uint32_t* buf0, uint32_t* buf1, uint16_t frame_count) {
   s_stop_after_next = false;
   s_streaming = true;
   s_first_txptrupd = true;
+  s_switch_count = 0;
 
   nrf_i2s_event_clear(NRF_I2S, NRF_I2S_EVENT_TXPTRUPD);
   nrf_i2s_event_clear(NRF_I2S, NRF_I2S_EVENT_STOPPED);
@@ -125,7 +131,7 @@ bool startStreaming(uint32_t* buf0, uint32_t* buf1, uint16_t frame_count) {
 
   nrf_i2s_transfer_set(NRF_I2S, frame_count, nullptr, buf0);
 
-  // Do NOT enable the interrupt yet. Trigger START and handle the first TXPTRUPD in main.
+  // Do not enable the interrupt yet. Trigger START and handle the first TXPTRUPD in main.
   // On nRF52, clearing TXPTRUPD in the ISR can hang (errata); the first event fires immediately.
   nrf_i2s_task_trigger(NRF_I2S, NRF_I2S_TASK_START);
 
@@ -142,6 +148,9 @@ bool startStreaming(uint32_t* buf0, uint32_t* buf1, uint16_t frame_count) {
   nrf_i2s_tx_buffer_set(NRF_I2S, buf1);
   s_next_index = 1;
   s_first_txptrupd = false;
+  if (s_switch_count < kMaxSwitchTimestamps) {
+    s_switch_timestamps[s_switch_count++] = (uint32_t)micros();
+  }
   return true;
 }
 
@@ -173,6 +182,9 @@ bool pollTxptrupd() {
   s_next_index = next;
   uint32_t* next_buf = (next == 0) ? s_buf0 : s_buf1;
   nrf_i2s_tx_buffer_set(NRF_I2S, next_buf);
+  if (s_switch_count < kMaxSwitchTimestamps) {
+    s_switch_timestamps[s_switch_count++] = (uint32_t)micros();
+  }
   return true;
 }
 
@@ -214,6 +226,25 @@ void requestStopAfterNextBuffer() {
 
 bool isStreaming() {
   return s_streaming;
+}
+
+void printSwitchTimestamps() {
+  Serial.println("--- Buffer switch timestamps (us) ---");
+  Serial.print("count=");
+  Serial.println(s_switch_count);
+  uint32_t prev = 0;
+  for (uint8_t i = 0; i < s_switch_count; i++) {
+    uint32_t t = s_switch_timestamps[i];
+    uint32_t delta = (i == 0) ? 0 : (t - prev);
+    Serial.print(i);
+    Serial.print(": ");
+    Serial.print(t);
+    Serial.print(" us  (delta ");
+    Serial.print(delta);
+    Serial.println(" us)");
+    prev = t;
+  }
+  Serial.println("--- end timestamps ---");
 }
 
 static bool writeFramesBlocking(uint32_t const* frames, uint16_t frame_count) {

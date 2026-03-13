@@ -51,6 +51,9 @@ void requestStopAfterNextBuffer();
 // True while I2S is running in streaming mode.
 bool isStreaming();
 
+// Debug: print buffer-switch timestamps (micros) recorded during streaming. Call after playback ends.
+void printSwitchTimestamps();
+
 } // namespace max98357
 
 #endif

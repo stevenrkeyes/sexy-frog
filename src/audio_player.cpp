@@ -267,6 +267,7 @@ bool playSoundFile(const char* filename) {
   }
 
   max98357::stopStreaming();
+  max98357::printSwitchTimestamps();
   audioFile.close();
 
   const unsigned long duration = millis() - startTime;
