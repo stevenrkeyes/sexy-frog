@@ -55,10 +55,16 @@ void BleDeviceList::addOrUpdate(BLEDevice& peripheral) {
   d.lastSeenMs = millis();
 
   d.companyId = 0xFFFF;
+  d.mfgSubtype = 0xFF;
   if (peripheral.hasManufacturerData() && peripheral.manufacturerDataLength() >= 2) {
-    uint8_t buf[2];
-    peripheral.manufacturerData(buf, 2);
+    int len = peripheral.manufacturerDataLength();
+    uint8_t buf[32];
+    if (len > (int)sizeof(buf)) len = sizeof(buf);
+    peripheral.manufacturerData(buf, len);
     d.companyId = (uint16_t)buf[0] | ((uint16_t)buf[1] << 8);
+    if (len >= 3) {
+      d.mfgSubtype = buf[2];
+    }
   }
 }
 
@@ -73,6 +79,50 @@ void BleDeviceList::pruneStale(unsigned long maxAgeMs) {
   }
 }
 
+// Well-known (companyId, manufacturer data subtype at offset 2) pairs.
+// Apple subtypes from continuity / proximity advertising (reverse-engineered, common in field).
+static const struct {
+  uint16_t companyId;
+  uint8_t subtype;
+  const char* name;
+} kKnownSubtypes[] = {
+    {0x004C, 0x01, "AirDrop"},
+    {0x004C, 0x02, "iBeacon"},
+    {0x004C, 0x03, "AirPrint"},
+    {0x004C, 0x05, "AirPlay"},
+    {0x004C, 0x06, "AppleTV"},
+    {0x004C, 0x07, "AirPods/Beats"},
+    {0x004C, 0x09, "AirPlay src"},
+    {0x004C, 0x0A, "AirPlay tgt"},
+    {0x004C, 0x0C, "Handoff"},
+    {0x004C, 0x0D, "Typing"},
+    {0x004C, 0x0F, "Nearby"},
+    {0x004C, 0x10, "NearbyAction"},
+    {0x004C, 0x12, "FindMy/Prox"},
+    {0x004C, 0x14, "HomeKit"},
+    {0x004C, 0x16, "AutoUnlock"},
+    // Google Fast Pair (company 0xFE2C): first payload byte after CI often used as type
+    {0xFE2C, 0x00, "FastPair"},
+    {0xFE2C, 0x02, "FastPair md"},
+};
+
+const char* BleDeviceList::subtypeNameOrHex(uint16_t companyId, uint8_t subtype, char* hexBuf,
+                                            size_t hexBufLen) const {
+  if (subtype == 0xFF) {
+    return "-";
+  }
+  for (size_t i = 0; i < sizeof(kKnownSubtypes) / sizeof(kKnownSubtypes[0]); i++) {
+    if (kKnownSubtypes[i].companyId == companyId && kKnownSubtypes[i].subtype == subtype) {
+      return kKnownSubtypes[i].name;
+    }
+  }
+  if (hexBuf && hexBufLen >= 5) {
+    snprintf(hexBuf, hexBufLen, "0x%02X", subtype);
+    return hexBuf;
+  }
+  return "?";
+}
+
 // Well-known Bluetooth SIG company identifiers (subset).
 const char* BleDeviceList::companyNameOrId(uint16_t companyId) const {
   switch (companyId) {
@@ -84,6 +134,7 @@ const char* BleDeviceList::companyNameOrId(uint16_t companyId) const {
     case 0x0087: return "Bose";
     case 0x00E4: return "Samsung";
     case 0x0153: return "Amazon";
+    case 0xFE2C: return "Google FP";
     case 0xFFFF: return "-";
     default:     return nullptr; // print as hex
   }
@@ -110,9 +161,9 @@ void BleDeviceList::printTable() {
 
   Serial.println();
   Serial.println("============ BLE Device List (by RSSI) ============");
-  Serial.print("RSSI   Address            Local Name      Device Name     Appearance  Company");
+  Serial.print("RSSI   Address            Local Name      Device Name     App   Company     Subtype");
   Serial.println();
-  Serial.println("-----  ----------------- --------------- --------------- ---------- ----------");
+  Serial.println("-----  ----------------- --------------- --------------- ----  ----------  ----------");
 
   for (int i = 0; i < n; i++) {
     const BleDeviceInfo& d = m_devices[indices[i]];
@@ -134,18 +185,25 @@ void BleDeviceList::printTable() {
     Serial.print(dn);
     for (int k = (int)strlen(dn); k < colName; k++) Serial.print(' ');
     Serial.print("  0x");
+    if (d.appearance < 0x10) Serial.print("0");
     Serial.print(d.appearance, HEX);
-    Serial.print("    ");
+    Serial.print("  ");
 
     const char* company = companyNameOrId(d.companyId);
     if (company) {
       Serial.print(company);
+      for (int k = (int)strlen(company); k < 10; k++) Serial.print(' ');
     } else {
-      char buf[8];
-      snprintf(buf, sizeof(buf), "0x%04X", d.companyId);
-      Serial.print(buf);
+      char cbuf[8];
+      snprintf(cbuf, sizeof(cbuf), "0x%04X", d.companyId);
+      Serial.print(cbuf);
+      for (int k = (int)strlen(cbuf); k < 10; k++) Serial.print(' ');
     }
-    Serial.println();
+    Serial.print("  ");
+
+    char subHex[8];
+    const char* sub = subtypeNameOrHex(d.companyId, d.mfgSubtype, subHex, sizeof(subHex));
+    Serial.println(sub);
   }
   Serial.print("Total: ");
   Serial.print(n);

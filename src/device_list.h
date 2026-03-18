@@ -12,6 +12,7 @@ struct BleDeviceInfo {
   char deviceName[33];
   uint16_t appearance;
   uint16_t companyId;    // from manufacturer data (first 2 bytes LE), 0xFFFF if none
+  uint8_t mfgSubtype;    // byte after company ID (offset 2); 0xFF if not present
   unsigned long lastSeenMs;
   bool inUse;
 };
@@ -40,6 +41,8 @@ class BleDeviceList {
   int findEmptySlot();
   void copyString(char* dst, size_t dstLen, const String& src);
   const char* companyNameOrId(uint16_t companyId) const;
+  const char* subtypeNameOrHex(uint16_t companyId, uint8_t subtype, char* hexBuf,
+                               size_t hexBufLen) const;
 };
 
 #endif // DEVICE_LIST_H

@@ -82,16 +82,16 @@ bool begin(uint8_t bclk_pin, uint8_t lrclk_pin, uint8_t dout_pin) {
                    NRF_I2S_PIN_NOT_CONNECTED);
 
   // Configure I2S for 16-bit stereo I2S format.
-  // Clocking chosen for ~44.1kHz:
-  // LRCK = (32MHz / 23) / 32 = 43478 Hz
+  // Clocking chosen for 25kHz:
+  // LRCK = (32MHz / 23) / 32 = 25000 Hz
   const bool ok = nrf_i2s_configure(NRF_I2S,
                                     NRF_I2S_MODE_MASTER,
                                     NRF_I2S_FORMAT_I2S,
                                     NRF_I2S_ALIGN_LEFT,
                                     NRF_I2S_SWIDTH_16BIT,
                                     NRF_I2S_CHANNELS_STEREO,
-                                    NRF_I2S_MCK_32MDIV23,
-                                    NRF_I2S_RATIO_32X);
+                                    NRF_I2S_MCK_32MDIV10,
+                                    NRF_I2S_RATIO_128X);
   if (!ok) {
     return false;
   }

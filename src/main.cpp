@@ -33,7 +33,7 @@ void setup() {
   if (initAudioPlayer()) {
     listSDFiles();
     Serial.println("Playing startup sound...");
-    playSoundFile("NORM-F~1.WAV");
+    playSoundFile("FROG-C~4.WAV");
   } else {
     Serial.println("Audio initialization failed - continuing without audio");
   }
