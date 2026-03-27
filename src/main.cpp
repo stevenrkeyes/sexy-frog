@@ -11,11 +11,15 @@
 #include "led_pattern.h"
 #include "audio_player.h"
 #include "device_list.h"
+#include "cap_touch.h"
 
 static BleDeviceList s_deviceList;
 static unsigned long s_lastPruneMs = 0;
 static const unsigned long kPruneIntervalMs = 10000;  // every 10 seconds
 static const unsigned long kStaleAgeMs = 60000;      // remove if not seen in 60s
+
+// Cap touch on A4/D4 (P0.04). Use A5: CapTouch touch(A5, 32, 2.5f).
+static CapTouch s_touch(A4, 32, 5.0f);
 
 void setup() {
   Serial.begin(115200);
@@ -34,6 +38,7 @@ void setup() {
     listSDFiles();
     Serial.println("Playing startup sound...");
     playSoundFile("FROG-C~4.WAV");
+    s_touch.beginCooldown(5);
   } else {
     Serial.println("Audio initialization failed - continuing without audio");
   }
@@ -50,6 +55,13 @@ void setup() {
 
   BLE.scan();
   s_lastPruneMs = millis();
+
+  if (s_touch.begin()) {
+    Serial.println("Cap touch started");
+  } else {
+    Serial.println("Cap touch init failed");
+  }
+  s_touch.update();
 }
 
 void loop() {
@@ -68,5 +80,11 @@ void loop() {
     s_deviceList.printTable();
   }
 
-  delay(10);
+  s_touch.update();
+
+  if (s_touch.rose()) {
+    playSoundFile("FROG-C~4.WAV");
+  }
+
+  delay(100);
 }
